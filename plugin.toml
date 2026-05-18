@@ -1,0 +1,28 @@
+schema = "animus.plugin.v1"
+name = "animus-subject-requirements"
+version = "0.1.0"
+plugin_kind = "subject_backend"
+description = "Requirements subject backend (git-friendly structured records)"
+
+[capabilities]
+streaming = true
+progress = false
+cancellation = false
+
+[binary]
+default = "animus-subject-requirements"
+
+[[env]]
+key = "ANIMUS_REQUIREMENTS_ROOT"
+description = "Root directory for requirement files (default: <project_root>/.animus/requirements)"
+required = false
+
+[[env]]
+key = "ANIMUS_REQUIREMENTS_ID_PREFIX"
+description = "ID prefix for requirement records (default: REQ)"
+required = false
+
+[[env]]
+key = "ANIMUS_REQUIREMENTS_INDEX_TTL_SECS"
+description = "_index.json cache TTL in seconds (default: 60)"
+required = false
