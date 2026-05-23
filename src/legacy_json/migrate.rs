@@ -105,10 +105,7 @@ async fn clear_legacy_requirements(path: &Path) -> anyhow::Result<()> {
     let raw = tokio::fs::read_to_string(path).await?;
     let mut value: Value = serde_json::from_str(&raw)?;
     if let Some(obj) = value.as_object_mut() {
-        obj.insert(
-            "requirements".to_string(),
-            Value::Object(Map::new()),
-        );
+        obj.insert("requirements".to_string(), Value::Object(Map::new()));
     }
     let body = serde_json::to_string_pretty(&value)?;
     let tmp: PathBuf = match path.file_name().and_then(|n| n.to_str()) {
@@ -175,10 +172,7 @@ mod tests {
         let raw = std::fs::read_to_string(legacy.path()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert!(parsed.get("tasks").is_some());
-        assert_eq!(
-            parsed.get("requirements"),
-            Some(&serde_json::json!({}))
-        );
+        assert_eq!(parsed.get("requirements"), Some(&serde_json::json!({})));
     }
 
     #[tokio::test]

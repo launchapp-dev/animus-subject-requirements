@@ -227,10 +227,7 @@ pub fn legacy_to_requirement_file(
         );
     }
     if let Some(category) = &legacy.category {
-        custom_fields.insert(
-            "category".to_string(),
-            JsonValue::String(category.clone()),
-        );
+        custom_fields.insert("category".to_string(), JsonValue::String(category.clone()));
     }
     if let Some(req_type) = &legacy.requirement_type {
         custom_fields.insert(
@@ -359,10 +356,7 @@ mod tests {
             cf.get("legacy_id").and_then(JsonValue::as_str),
             Some("OLD-1")
         );
-        assert_eq!(
-            cf.get("category").and_then(JsonValue::as_str),
-            Some("auth")
-        );
+        assert_eq!(cf.get("category").and_then(JsonValue::as_str), Some("auth"));
         assert_eq!(
             cf.get("requirement_type").and_then(JsonValue::as_str),
             Some("functional")

@@ -788,8 +788,8 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let cfg = RequirementsConfig::new(dir.path().join("md"))
-            .with_legacy_json_path(&legacy_path);
+        let cfg =
+            RequirementsConfig::new(dir.path().join("md")).with_legacy_json_path(&legacy_path);
         let backend = RequirementsBackend::new(cfg).await.expect("backend");
 
         let list = backend.list(SubjectFilter::default()).await.expect("list");
@@ -813,7 +813,9 @@ mod tests {
             .await
             .expect("create");
         let id = SubjectId::new(fm.id.clone());
-        let path = backend.store.path_for(&native_id_from_full(&fm.id).unwrap());
+        let path = backend
+            .store
+            .path_for(&native_id_from_full(&fm.id).unwrap());
         assert!(path.exists());
 
         let deleted = backend.delete(&id).await.expect("delete");
@@ -852,14 +854,17 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let cfg = RequirementsConfig::new(dir.path().join("md"))
-            .with_legacy_json_path(&legacy_path);
+        let cfg =
+            RequirementsConfig::new(dir.path().join("md")).with_legacy_json_path(&legacy_path);
         let backend = RequirementsBackend::new(cfg).await.expect("backend");
         let deleted = backend
             .delete(&SubjectId::new("requirement:REQ-5".to_string()))
             .await
             .expect("delete");
-        assert!(!deleted, "legacy-only ids are intentionally not hard-deleted");
+        assert!(
+            !deleted,
+            "legacy-only ids are intentionally not hard-deleted"
+        );
         // Still visible via list (proves we didn't accidentally write).
         let list = backend.list(SubjectFilter::default()).await.expect("list");
         assert_eq!(list.subjects.len(), 1);
