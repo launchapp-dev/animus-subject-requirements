@@ -1,6 +1,6 @@
 schema = "animus.plugin.v1"
 name = "animus-subject-requirements"
-version = "0.1.0"
+version = "0.1.5"
 plugin_kind = "subject_backend"
 description = "Requirements subject backend (git-friendly structured records)"
 
@@ -25,4 +25,19 @@ required = false
 [[env]]
 key = "ANIMUS_REQUIREMENTS_INDEX_TTL_SECS"
 description = "_index.json cache TTL in seconds (default: 60)"
+required = false
+
+[[env]]
+key = "ANIMUS_REQUIREMENTS_LEGACY_JSON"
+description = "Path to in-tree legacy core-state.json for read+migrate compat (default: unset)"
+required = false
+
+[[env]]
+key = "ANIMUS_SCOPED_ROOT"
+description = "Scoped runtime root for fallback legacy path resolution (default: unset)"
+required = false
+
+[[env]]
+key = "ANIMUS_REQUIREMENTS_MIGRATE_LEGACY"
+description = "When truthy, run one-shot legacy JSON -> Markdown migration on startup (default: false)"
 required = false

@@ -23,6 +23,8 @@ use serde_json::Value as JsonValue;
 
 use crate::config::RequirementsConfig;
 use crate::frontmatter::{Frontmatter, RequirementFile};
+use crate::legacy_json::migrate::{migrate_legacy_to_markdown, MigrationReport};
+use crate::legacy_json::store::LegacyJsonStore;
 use crate::status_map::{self, RequirementNativeStatus};
 use crate::store::{
     full_id_from_native, native_id_from_full, next_id, CachedEntry, RequirementsStore, StoreError,
@@ -35,21 +37,76 @@ const KIND: &str = "requirement";
 #[derive(Debug, Clone)]
 pub struct RequirementsBackend {
     store: Arc<RequirementsStore>,
+    legacy: Option<Arc<LegacyJsonStore>>,
 }
 
 impl RequirementsBackend {
     /// Build a new backend from a [`RequirementsConfig`]. Ensures the
-    /// root directory exists.
+    /// root directory exists. When `config.legacy_json_path` is set, the
+    /// legacy store is attached and (if `migrate_legacy_on_start` is true
+    /// and the legacy file exists) a one-shot migration runs before the
+    /// backend returns.
     pub async fn new(config: RequirementsConfig) -> anyhow::Result<Self> {
+        let legacy_path = config.legacy_json_path.clone();
+        let migrate_on_start = config.migrate_legacy_on_start;
         let store = RequirementsStore::new(config).await?;
+        let legacy = legacy_path.map(|p| Arc::new(LegacyJsonStore::new(p)));
+
+        if migrate_on_start {
+            if let Some(legacy_store) = legacy.as_ref() {
+                let report = migrate_legacy_to_markdown(legacy_store.as_ref(), &store, false)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("legacy migration failed: {e}"))?;
+                log_migration_report(&report);
+            }
+        }
+
         Ok(Self {
             store: Arc::new(store),
+            legacy,
         })
     }
 
     /// Borrow the underlying store. Tests use this to introspect state.
     pub fn store(&self) -> &Arc<RequirementsStore> {
         &self.store
+    }
+
+    /// Borrow the legacy store, if compatibility is enabled.
+    pub fn legacy_store(&self) -> Option<&Arc<LegacyJsonStore>> {
+        self.legacy.as_ref()
+    }
+
+    /// Delete a requirement by id. Deletes the on-disk Markdown file if
+    /// present; if the requirement only exists in legacy JSON, the call
+    /// is a no-op and returns `Ok(false)`. Returns `Ok(true)` when a
+    /// Markdown file was deleted.
+    ///
+    /// Note: not part of the [`SubjectBackend`] trait surface (which has
+    /// no `delete` method as of `animus-subject-protocol` v0.1.6). The
+    /// in-tree adapter exposed this op directly to CLI callers; the
+    /// equivalent here is a typed method invoked from in-process glue.
+    pub async fn delete(&self, id: &SubjectId) -> Result<bool, BackendError> {
+        let native = Self::native_id(id)?;
+        let path = self.store.path_for(&native);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {
+                let _ = self.store.rebuild_index().await.map_err(map_store_err)?;
+                Ok(true)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // No-op when the entry only ever lived in legacy JSON.
+                // Hard-delete from the legacy file is intentionally not
+                // supported here — operators should migrate first, then
+                // delete, so the two stores stay strictly read-only-from-
+                // legacy / writable-to-markdown.
+                Ok(false)
+            }
+            Err(e) => Err(BackendError::Other(anyhow::anyhow!(
+                "delete failed at {}: {e}",
+                path.display()
+            ))),
+        }
     }
 
     /// Convert a [`SubjectId`] into the native (`REQ-NNNN`) portion.
@@ -122,6 +179,55 @@ impl RequirementsBackend {
         Ok((previous, frontmatter.status))
     }
 
+    /// Same logic as [`Self::passes_filter`] but operating on an
+    /// already-constructed [`Subject`] (used for legacy-JSON-sourced
+    /// entries that bypass the cached index path).
+    fn passes_subject_filter(
+        subject: &Subject,
+        frontmatter: &Frontmatter,
+        filter: &SubjectFilter,
+    ) -> bool {
+        if !filter.kind.is_empty() && !filter.kind.iter().any(|k| k == &subject.kind) {
+            return false;
+        }
+        if !filter.status.is_empty() && !filter.status.contains(&subject.status) {
+            return false;
+        }
+        if let Some(native) = &filter.native_status {
+            if frontmatter.status.as_str() != native {
+                return false;
+            }
+        }
+        if !filter.assignee.is_empty() {
+            match subject.assignee.as_deref() {
+                Some(value) if filter.assignee.iter().any(|a| a == value) => {}
+                _ => return false,
+            }
+        }
+        if !filter.labels_any.is_empty()
+            && !filter
+                .labels_any
+                .iter()
+                .any(|wanted| subject.labels.iter().any(|l| l == wanted))
+        {
+            return false;
+        }
+        if !filter.labels_all.is_empty()
+            && !filter
+                .labels_all
+                .iter()
+                .all(|wanted| subject.labels.iter().any(|l| l == wanted))
+        {
+            return false;
+        }
+        if let Some(updated_since) = filter.updated_since {
+            if subject.updated_at < updated_since {
+                return false;
+            }
+        }
+        true
+    }
+
     fn passes_filter(entry: &CachedEntry, filter: &SubjectFilter) -> bool {
         if entry.archived {
             return false;
@@ -186,6 +292,35 @@ impl SubjectBackend for RequirementsBackend {
             .filter(|(_, entry)| Self::passes_filter(entry, &filter))
             .map(|(native, entry)| cached_entry_to_subject(native, entry))
             .collect();
+
+        // Union legacy JSON entries. Markdown wins on id collision —
+        // every native id already in `subjects` is skipped on the legacy
+        // side. Filters are applied to the synthesized Subject.
+        if let Some(legacy) = self.legacy.as_ref() {
+            let known: std::collections::HashSet<String> =
+                subjects.iter().map(|s| s.id.0.clone()).collect();
+            match legacy.list().await {
+                Ok(entries) => {
+                    for (native, file) in entries {
+                        let full_id = full_id_from_native(&native);
+                        if known.contains(&full_id) {
+                            continue;
+                        }
+                        let subject = frontmatter_to_subject(&native, &file.frontmatter, false);
+                        if Self::passes_subject_filter(&subject, &file.frontmatter, &filter) {
+                            subjects.push(subject);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Legacy compat is best-effort; a broken legacy file
+                    // must not take the whole backend down. Surface as
+                    // a tracing warning instead.
+                    tracing::warn!(error = %e, "legacy_json list failed; serving Markdown only");
+                }
+            }
+        }
+
         // Stable: by updated_at descending then id ascending.
         subjects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.0.cmp(&b.id.0)));
 
@@ -212,8 +347,22 @@ impl SubjectBackend for RequirementsBackend {
 
     async fn get(&self, id: &SubjectId) -> Result<Subject, BackendError> {
         let native = Self::native_id(id)?;
-        let file = self.store.read(&native).await.map_err(map_store_err)?;
-        Ok(frontmatter_to_subject(&native, &file.frontmatter, false))
+        match self.store.read(&native).await {
+            Ok(file) => Ok(frontmatter_to_subject(&native, &file.frontmatter, false)),
+            Err(StoreError::NotFound(_)) => {
+                if let Some(legacy) = self.legacy.as_ref() {
+                    if let Some(file) = legacy
+                        .get(&native)
+                        .await
+                        .map_err(|e| BackendError::Other(anyhow::anyhow!(e)))?
+                    {
+                        return Ok(frontmatter_to_subject(&native, &file.frontmatter, false));
+                    }
+                }
+                Err(BackendError::NotFound(native))
+            }
+            Err(other) => Err(map_store_err(other)),
+        }
     }
 
     async fn update(&self, id: &SubjectId, patch: SubjectPatch) -> Result<Subject, BackendError> {
@@ -470,6 +619,22 @@ fn description_for(status: RequirementNativeStatus) -> &'static str {
     }
 }
 
+fn log_migration_report(report: &MigrationReport) {
+    if !report.any_changes() && report.errors.is_empty() && report.skipped_existing.is_empty() {
+        return;
+    }
+    tracing::info!(
+        migrated = report.migrated.len(),
+        skipped_existing = report.skipped_existing.len(),
+        errors = report.errors.len(),
+        legacy_cleared = report.legacy_cleared,
+        "legacy_json migration complete"
+    );
+    for (id, err) in &report.errors {
+        tracing::warn!(id = %id, error = %err, "legacy_json migration failed for entry");
+    }
+}
+
 fn map_store_err(err: StoreError) -> BackendError {
     match err {
         StoreError::NotFound(id) => BackendError::NotFound(id),
@@ -593,6 +758,150 @@ mod tests {
         };
         RequirementsBackend::apply_patch(&mut fm, &patch_clear).unwrap();
         assert!(!fm.custom_fields.contains_key("assignee"));
+    }
+
+    #[tokio::test]
+    async fn list_unions_legacy_json_when_configured() {
+        use crate::config::RequirementsConfig;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let legacy_path = dir.path().join("core-state.json");
+        std::fs::write(
+            &legacy_path,
+            r#"{
+                "requirements": {
+                    "REQ-9001": {
+                        "id": "REQ-9001",
+                        "title": "Legacy entry",
+                        "description": "from json",
+                        "priority": "must",
+                        "status": "refined",
+                        "tags": [],
+                        "acceptance_criteria": [],
+                        "comments": [],
+                        "links": {},
+                        "linked_task_ids": [],
+                        "created_at": "2026-05-01T00:00:00Z",
+                        "updated_at": "2026-05-01T00:00:00Z"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let cfg = RequirementsConfig::new(dir.path().join("md"))
+            .with_legacy_json_path(&legacy_path);
+        let backend = RequirementsBackend::new(cfg).await.expect("backend");
+
+        let list = backend.list(SubjectFilter::default()).await.expect("list");
+        assert_eq!(list.subjects.len(), 1);
+        assert_eq!(list.subjects[0].title, "Legacy entry");
+        // Direct get returns the same entry.
+        let got = backend
+            .get(&SubjectId::new("requirement:REQ-9001".to_string()))
+            .await
+            .expect("get");
+        assert_eq!(got.title, "Legacy entry");
+    }
+
+    #[tokio::test]
+    async fn delete_removes_markdown_file() {
+        use crate::config::RequirementsConfig;
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = RequirementsConfig::new(dir.path().join("md"));
+        let backend = RequirementsBackend::new(cfg).await.expect("backend");
+        let fm = create_requirement(&backend, "delete me", "body")
+            .await
+            .expect("create");
+        let id = SubjectId::new(fm.id.clone());
+        let path = backend.store.path_for(&native_id_from_full(&fm.id).unwrap());
+        assert!(path.exists());
+
+        let deleted = backend.delete(&id).await.expect("delete");
+        assert!(deleted);
+        assert!(!path.exists());
+
+        // Second delete returns false (no-op).
+        let again = backend.delete(&id).await.expect("delete-again");
+        assert!(!again);
+    }
+
+    #[tokio::test]
+    async fn delete_is_noop_for_legacy_only_id() {
+        use crate::config::RequirementsConfig;
+        let dir = tempfile::TempDir::new().unwrap();
+        let legacy_path = dir.path().join("core-state.json");
+        std::fs::write(
+            &legacy_path,
+            r#"{
+                "requirements": {
+                    "REQ-5": {
+                        "id": "REQ-5",
+                        "title": "Legacy only",
+                        "description": "",
+                        "priority": "should",
+                        "status": "refined",
+                        "tags": [],
+                        "acceptance_criteria": [],
+                        "comments": [],
+                        "links": {},
+                        "linked_task_ids": [],
+                        "created_at": "2026-05-01T00:00:00Z",
+                        "updated_at": "2026-05-01T00:00:00Z"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let cfg = RequirementsConfig::new(dir.path().join("md"))
+            .with_legacy_json_path(&legacy_path);
+        let backend = RequirementsBackend::new(cfg).await.expect("backend");
+        let deleted = backend
+            .delete(&SubjectId::new("requirement:REQ-5".to_string()))
+            .await
+            .expect("delete");
+        assert!(!deleted, "legacy-only ids are intentionally not hard-deleted");
+        // Still visible via list (proves we didn't accidentally write).
+        let list = backend.list(SubjectFilter::default()).await.expect("list");
+        assert_eq!(list.subjects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn migrate_on_start_converts_legacy() {
+        use crate::config::RequirementsConfig;
+        let dir = tempfile::TempDir::new().unwrap();
+        let legacy_path = dir.path().join("core-state.json");
+        std::fs::write(
+            &legacy_path,
+            r#"{
+                "requirements": {
+                    "REQ-100": {
+                        "id": "REQ-100",
+                        "title": "to migrate",
+                        "description": "",
+                        "priority": "must",
+                        "status": "approved",
+                        "tags": [],
+                        "acceptance_criteria": [],
+                        "comments": [],
+                        "links": {},
+                        "linked_task_ids": [],
+                        "created_at": "2026-05-01T00:00:00Z",
+                        "updated_at": "2026-05-01T00:00:00Z"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let root = dir.path().join("md");
+        let cfg = RequirementsConfig::new(&root)
+            .with_legacy_json_path(&legacy_path)
+            .with_migrate_legacy_on_start(true);
+        let _backend = RequirementsBackend::new(cfg).await.expect("backend");
+        let migrated = root.join("REQ-100.md");
+        assert!(migrated.exists(), "migration should have written the file");
+        let raw = std::fs::read_to_string(&legacy_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.get("requirements"), Some(&serde_json::json!({})));
     }
 
     #[test]

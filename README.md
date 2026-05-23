@@ -89,6 +89,35 @@ This plugin sits beside `animus-subject-markdown` (general task storage in markd
 | `ANIMUS_REQUIREMENTS_ROOT`             | `<project_root>/.animus/requirements`            | Where requirement files live                   |
 | `ANIMUS_REQUIREMENTS_ID_PREFIX`        | `REQ`                                            | Prefix for new ids (`REQ-0001`)                |
 | `ANIMUS_REQUIREMENTS_INDEX_TTL_SECS`   | `60`                                             | How stale `_index.json` may go before rebuild  |
+| `ANIMUS_REQUIREMENTS_LEGACY_JSON`      | _(unset)_                                        | Path to the in-tree `core-state.json` for legacy read+migrate compat |
+| `ANIMUS_SCOPED_ROOT`                   | _(unset)_                                        | Fallback for legacy path: `<scoped>/core-state.json` is probed when `ANIMUS_REQUIREMENTS_LEGACY_JSON` is unset |
+| `ANIMUS_REQUIREMENTS_MIGRATE_LEGACY`   | `false`                                          | When truthy, runs one-shot legacy → Markdown migration on startup |
+
+## Legacy in-tree JSON compatibility
+
+Before v0.4.0, requirements lived inside the in-tree `core-state.json` file under `~/.animus/<repo-scope>/`. This plugin can read that legacy file alongside its own Markdown store so existing projects keep working unmodified during the migration:
+
+- **Read+union:** On every `list()` call, legacy entries are merged into the Markdown set. Markdown wins on id collision; legacy entries surface with their rich fields (acceptance criteria, comments, linked tasks, links, legacy id, category, source) preserved under `custom_fields.*` and `custom_fields.origin_store = "legacy_json"`.
+- **Read fallback for `get()`:** If a `REQ-NNNN.md` file does not exist, the plugin falls back to the legacy JSON before returning `NotFound`.
+- **Status fold:** The in-tree eleven-state lifecycle (`draft / refined / planned / in-progress / done / po-review / em-review / needs-rework / approved / implemented / deprecated`) collapses to the four-state native model (`drafted / refined / approved / deprecated`). The original string is preserved under `custom_fields.legacy_status`.
+- **One-shot migration:** Set `ANIMUS_REQUIREMENTS_MIGRATE_LEGACY=1` to convert every legacy entry into a `REQ-NNNN.md` file at startup. The legacy `requirements` map is cleared after every entry is successfully written; other top-level fields in `core-state.json` are preserved verbatim. Idempotent — re-running after a successful migration is a no-op.
+
+The legacy read path is intentionally **append-only on the standalone side**: new requirements always land in Markdown, never back into the legacy JSON. `delete()` on a legacy-only id is a no-op (returns `Ok(false)`) — operators should migrate first, then delete.
+
+### What this plugin does not own (yet)
+
+The in-tree `BuiltinRequirementsProvider` also exposed three orchestration verbs on the CLI:
+
+- `draft_requirements` — LLM-driven generation of an initial requirement set from project context.
+- `refine_requirements` — LLM-driven iterative clarification of one or more requirements.
+- `execute_requirements` — Materializes approved requirements into tasks via the planning state machine.
+
+These are **planning-pipeline operations**, not data ops — they require the agent runtime, model registry, and codebase scanner. They do not fit the `SubjectBackend` trait surface (which is data: `list / get / update / watch / health`). The `delete_requirement` CLI verb is implemented locally as [`RequirementsBackend::delete`](src/backend.rs) but is not yet wired through the protocol (the wire `SubjectBackend` trait has no `delete` method as of `animus-subject-protocol` v0.1.6 — adding it is a protocol-version change).
+
+Deleting the in-tree `InTreeRequirementsSubjectBackend` for data ops is unblocked by this release. Removing the three orchestration verbs requires either:
+
+1. Adding a small `subject_planning/*` JSON-RPC namespace to the protocol that orchestrates LLM-driven verbs, or
+2. Keeping those three verbs in the orchestrator-core service layer as a separate (non-subject-backend) facade.
 
 ## Index cache
 

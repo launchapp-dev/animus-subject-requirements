@@ -20,6 +20,7 @@ pub mod backend;
 pub mod config;
 pub mod frontmatter;
 pub mod id_gen;
+pub mod legacy_json;
 pub mod status_map;
 pub mod store;
 pub mod watcher;
