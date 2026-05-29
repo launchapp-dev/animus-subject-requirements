@@ -1,6 +1,6 @@
 schema = "animus.plugin.v1"
 name = "animus-subject-requirements"
-version = "0.1.5"
+version = "0.1.7"
 plugin_kind = "subject_backend"
 description = "Requirements subject backend (git-friendly structured records)"
 
@@ -8,6 +8,21 @@ description = "Requirements subject backend (git-friendly structured records)"
 streaming = true
 progress = false
 cancellation = false
+subject_kinds = ["requirement"]
+methods = [
+  "requirement/list",
+  "requirement/get",
+  "requirement/update",
+  "requirement/schema",
+  "requirement/watch",
+  "subject/list",
+  "subject/get",
+  "subject/update",
+  "subject/schema",
+  "subject/watch",
+  "health/check",
+  "subject_kind:requirement",
+]
 
 [binary]
 default = "animus-subject-requirements"

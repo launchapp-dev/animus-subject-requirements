@@ -1,6 +1,6 @@
 [package]
 name = "animus-subject-requirements"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 license = "MIT"
 description = "Requirements subject backend for Animus — git-friendly structured requirement records"
@@ -18,9 +18,9 @@ name = "animus-subject-requirements"
 path = "src/main.rs"
 
 [dependencies]
-animus-plugin-protocol  = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.8" }
-animus-subject-protocol = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.8" }
-animus-plugin-runtime   = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.8" }
+animus-plugin-protocol  = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.13" }
+animus-subject-protocol = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.13" }
+animus-plugin-runtime   = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.13" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync"] }
 tokio-stream = "0.1"
