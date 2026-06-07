@@ -88,13 +88,12 @@ impl RequirementsBackend {
     /// equivalent here is a typed method invoked from in-process glue.
     pub async fn delete(&self, id: &SubjectId) -> Result<bool, BackendError> {
         let native = Self::native_id(id)?;
-        let path = self.store.path_for(&native);
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => {
+        match self.store.delete(&native).await {
+            Ok(_path) => {
                 let _ = self.store.rebuild_index().await.map_err(map_store_err)?;
                 Ok(true)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(StoreError::NotFound(_)) => {
                 // No-op when the entry only ever lived in legacy JSON.
                 // Hard-delete from the legacy file is intentionally not
                 // supported here — operators should migrate first, then
@@ -102,10 +101,7 @@ impl RequirementsBackend {
                 // legacy / writable-to-markdown.
                 Ok(false)
             }
-            Err(e) => Err(BackendError::Other(anyhow::anyhow!(
-                "delete failed at {}: {e}",
-                path.display()
-            ))),
+            Err(other) => Err(map_store_err(other)),
         }
     }
 
@@ -398,6 +394,33 @@ impl SubjectBackend for RequirementsBackend {
         watcher::spawn(self.store.clone())
     }
 
+    async fn delete(
+        &self,
+        id: &SubjectId,
+    ) -> Result<animus_subject_protocol::DeleteSubjectResponse, BackendError> {
+        // Route through the existing inherent `delete` which knows about
+        // both the Markdown store and the legacy JSON sidecar: returns
+        // Ok(true) when the Markdown file was removed, Ok(false) when the
+        // id only exists in the legacy JSON store (the legacy JSON file is
+        // read-only here — operators are expected to migrate before
+        // deleting).
+        let removed_from_markdown = self.delete(id).await?;
+        // If the legacy JSON sidecar still carries the same id, the
+        // subject would reappear on the next list/get. Report ok=false so
+        // the caller knows the delete was incomplete: operators should
+        // migrate the legacy JSON entry to Markdown first, then re-issue
+        // delete to remove it from the writable surface.
+        if let Some(legacy) = self.legacy.as_ref() {
+            let native = Self::native_id(id)?;
+            if let Ok(Some(_)) = legacy.get(&native).await {
+                return Ok(animus_subject_protocol::DeleteSubjectResponse { ok: false });
+            }
+        }
+        Ok(animus_subject_protocol::DeleteSubjectResponse {
+            ok: removed_from_markdown,
+        })
+    }
+
     fn schema(&self) -> SubjectSchema {
         let native_status_values = RequirementNativeStatus::ALL
             .iter()
@@ -420,8 +443,15 @@ impl SubjectBackend for RequirementsBackend {
                 SubjectStatus::Done,
                 SubjectStatus::Cancelled,
             ],
-            supports_watch: true,
+            // animus-plugin-runtime v0.2.1's subject helper does NOT
+            // register `subject/watch`; that streaming surface remains in
+            // the backend trait but is not exposed on the wire by the
+            // shared helper. Set `supports_watch=false` so clients don't
+            // attempt subscriptions that the v0.5.7 helper would reject
+            // with METHOD_NOT_FOUND.
+            supports_watch: false,
             supports_create: true,
+            supports_delete: true,
             supports_pagination: true,
             native_status_values,
             status_dispatch_hints,

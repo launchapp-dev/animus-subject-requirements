@@ -160,6 +160,37 @@ impl RequirementsStore {
         RequirementFile::parse(&raw).map_err(|source| StoreError::Parse { path, source })
     }
 
+    /// Permanently remove a requirement file by native id. Returns
+    /// [`StoreError::NotFound`] if the file does not exist (in either the
+    /// root or `archived/`). Callers should follow up with
+    /// [`Self::rebuild_index`] to invalidate the cache.
+    ///
+    /// Rejects native ids that are not pure filename fragments — anything
+    /// containing path separators (`/`, `\`), `..`, or an absolute root —
+    /// to prevent crafted ids escaping the requirements directory.
+    pub async fn delete(&self, native_id: &str) -> Result<PathBuf, StoreError> {
+        if native_id.is_empty()
+            || native_id.contains('/')
+            || native_id.contains('\\')
+            || native_id.contains("..")
+            || Path::new(native_id).is_absolute()
+            || std::path::Path::new(native_id).components().count() != 1
+        {
+            return Err(StoreError::InvalidId(native_id.to_string()));
+        }
+        let path = self.path_for(native_id);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(StoreError::NotFound(native_id.to_string()))
+            }
+            Err(e) => Err(StoreError::Io {
+                path: path.clone(),
+                source: e,
+            }),
+        }
+    }
+
     /// Atomically write a requirement file. New files go under the root
     /// directory; archived requirements stay in `archived/`.
     pub async fn write(&self, file: &RequirementFile) -> Result<PathBuf, StoreError> {

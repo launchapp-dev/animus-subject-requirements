@@ -1,11 +1,15 @@
 schema = "animus.plugin.v1"
 name = "animus-subject-requirements"
-version = "0.1.7"
+version = "0.1.8"
 plugin_kind = "subject_backend"
 description = "Requirements subject backend (git-friendly structured records)"
 
 [capabilities]
-streaming = true
+# streaming false in v0.1.8: subject/watch is no longer wired by the
+# v0.5.7 plugin-runtime helper. The backend trait impl still produces a
+# watcher stream, but the wire surface does not expose it. Revisit when
+# the runtime adds per-subscription streaming.
+streaming = false
 progress = false
 cancellation = false
 subject_kinds = ["requirement"]
@@ -13,13 +17,13 @@ methods = [
   "requirement/list",
   "requirement/get",
   "requirement/update",
+  "requirement/delete",
   "requirement/schema",
-  "requirement/watch",
   "subject/list",
   "subject/get",
   "subject/update",
+  "subject/delete",
   "subject/schema",
-  "subject/watch",
   "health/check",
   "subject_kind:requirement",
 ]
