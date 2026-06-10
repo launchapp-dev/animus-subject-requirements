@@ -293,8 +293,11 @@ impl SubjectBackend for RequirementsBackend {
         // every native id already in `subjects` is skipped on the legacy
         // side. Filters are applied to the synthesized Subject.
         if let Some(legacy) = self.legacy.as_ref() {
-            let known: std::collections::HashSet<String> =
-                subjects.iter().map(|s| s.id.0.clone()).collect();
+            let known: std::collections::HashSet<String> = index
+                .entries
+                .keys()
+                .map(|native| full_id_from_native(native))
+                .collect();
             match legacy.list().await {
                 Ok(entries) => {
                     for (native, file) in entries {

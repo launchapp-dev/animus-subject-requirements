@@ -198,12 +198,7 @@ impl RequirementFile {
         let yaml = serde_yaml::to_string(&self.frontmatter)
             .map_err(|e| FrontmatterError::Yaml(e.to_string()))?;
         let yaml_trimmed = yaml.trim_end_matches('\n');
-        let body = if self.body.is_empty() || self.body.starts_with('\n') {
-            self.body.clone()
-        } else {
-            format!("\n{}", self.body)
-        };
-        Ok(format!("---\n{yaml_trimmed}\n---{body}"))
+        Ok(format!("---\n{yaml_trimmed}\n---\n{}", self.body))
     }
 }
 
